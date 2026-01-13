@@ -45,6 +45,18 @@ class PoseVisualizer:
         (24, 26), (26, 28),
     ]
     
+    # Lower body connections (hip, knee, ankle only)
+    LOWER_BODY_CONNECTIONS = [
+        (23, 24),  # hip to hip
+        (23, 25),  # left hip to left knee
+        (24, 26),  # right hip to right knee
+        (25, 27),  # left knee to left ankle
+        (26, 28),  # right knee to right ankle
+    ]
+    
+    # Lower body landmark indices
+    LOWER_BODY_INDICES = [23, 24, 25, 26, 27, 28]  # hip, knee, ankle
+    
     def __init__(self, data_file: str):
         """
         Args:
@@ -67,7 +79,32 @@ class PoseVisualizer:
         print(f"Loaded {len(data)} frames dari {self.data_file}")
         return data
     
-    def plot_2d_pose(self, frame_idx: int = 0, save_path: Optional[str] = None):
+    def _filter_landmarks(self, landmarks, body_mode='full'):
+        """Filter landmarks berdasarkan body mode"""
+        if body_mode == 'full':
+            return landmarks, list(range(len(landmarks)))
+        
+        # Lower body: hanya hip, knee, ankle
+        if len(landmarks) <= max(self.LOWER_BODY_INDICES):
+            return landmarks, list(range(len(landmarks)))
+        
+        filtered = landmarks[self.LOWER_BODY_INDICES]
+        index_mapping = {orig_idx: new_idx for new_idx, orig_idx in enumerate(self.LOWER_BODY_INDICES)}
+        return filtered, index_mapping
+    
+    def _filter_connections(self, connections, body_mode='full', index_mapping=None):
+        """Filter connections berdasarkan body mode"""
+        if body_mode == 'full':
+            return connections
+        
+        # Lower body connections
+        filtered = []
+        for conn in self.LOWER_BODY_CONNECTIONS:
+            if conn[0] in index_mapping and conn[1] in index_mapping:
+                filtered.append((index_mapping[conn[0]], index_mapping[conn[1]]))
+        return filtered
+    
+    def plot_2d_pose(self, frame_idx: int = 0, save_path: Optional[str] = None, body_mode: str = 'full'):
         """Plot pose 2D untuk satu frame dengan koordinat statis"""
         if frame_idx >= len(self.data):
             print(f"Frame {frame_idx} tidak ada. Total frames: {len(self.data)}")
@@ -86,10 +123,14 @@ class PoseVisualizer:
             hip_center = (landmarks_2d[23] + landmarks_2d[24]) / 2.0
             landmarks_2d = landmarks_2d - hip_center
         
+        # Filter landmarks berdasarkan body mode
+        filtered_landmarks_2d, index_mapping = self._filter_landmarks(landmarks_2d, body_mode)
+        filtered_connections = self._filter_connections(self.POSE_CONNECTIONS, body_mode, index_mapping)
+        
         fig, ax = plt.subplots(figsize=(10, 10))
         
         # Plot connections
-        for connection in self.POSE_CONNECTIONS:
+        for connection in filtered_connections:
             if (connection[0] < len(landmarks_2d) and 
                 connection[1] < len(landmarks_2d)):
                 x_coords = [landmarks_2d[connection[0]][0], landmarks_2d[connection[1]][0]]
@@ -97,20 +138,32 @@ class PoseVisualizer:
                 ax.plot(x_coords, y_coords, 'b-', linewidth=2, alpha=0.6)
         
         # Plot landmarks
-        ax.scatter(landmarks_2d[:, 0], landmarks_2d[:, 1], c='r', s=50, zorder=5)
+        ax.scatter(filtered_landmarks_2d[:, 0], filtered_landmarks_2d[:, 1], c='r', s=50, zorder=5)
         
         # Label beberapa landmark penting
-        important_landmarks = [0, 11, 12, 23, 24]  # nose, shoulders, hips
-        for idx in important_landmarks:
-            if idx < len(landmarks_2d):
-                ax.annotate(self.LANDMARK_NAMES[idx], 
-                          (landmarks_2d[idx][0], landmarks_2d[idx][1]),
-                          fontsize=8)
+        if body_mode == 'full':
+            important_landmarks = [0, 11, 12, 23, 24]  # nose, shoulders, hips
+            for orig_idx in important_landmarks:
+                if orig_idx in index_mapping:
+                    idx = index_mapping[orig_idx]
+                    if idx < len(filtered_landmarks_2d):
+                        ax.annotate(self.LANDMARK_NAMES[orig_idx], 
+                                  (filtered_landmarks_2d[idx][0], filtered_landmarks_2d[idx][1]),
+                                  fontsize=8)
+        else:
+            # Lower body: label semua
+            lower_body_names = ['left_hip', 'right_hip', 'left_knee', 'right_knee', 
+                               'left_ankle', 'right_ankle']
+            for idx in range(len(filtered_landmarks_2d)):
+                if idx < len(lower_body_names):
+                    ax.annotate(lower_body_names[idx], 
+                              (filtered_landmarks_2d[idx][0], filtered_landmarks_2d[idx][1]),
+                              fontsize=8)
         
         # Set bounds yang konsisten
         max_range = max(
-            landmarks_2d[:, 0].max() - landmarks_2d[:, 0].min(),
-            landmarks_2d[:, 1].max() - landmarks_2d[:, 1].min()
+            filtered_landmarks_2d[:, 0].max() - filtered_landmarks_2d[:, 0].min(),
+            filtered_landmarks_2d[:, 1].max() - filtered_landmarks_2d[:, 1].min()
         ) / 2.0
         if max_range < 50:
             max_range = 200  # Minimum range untuk pixel
@@ -133,7 +186,7 @@ class PoseVisualizer:
         else:
             plt.show()
     
-    def plot_3d_pose(self, frame_idx: int = 0, save_path: Optional[str] = None):
+    def plot_3d_pose(self, frame_idx: int = 0, save_path: Optional[str] = None, body_mode: str = 'full'):
         """Plot pose 3D untuk satu frame dengan koordinat statis"""
         if frame_idx >= len(self.data):
             print(f"Frame {frame_idx} tidak ada. Total frames: {len(self.data)}")
@@ -165,11 +218,15 @@ class PoseVisualizer:
             ])
             landmarks_3d = landmarks_3d @ rotation_matrix.T
         
+        # Filter landmarks berdasarkan body mode
+        filtered_landmarks_3d, index_mapping = self._filter_landmarks(landmarks_3d, body_mode)
+        filtered_connections = self._filter_connections(self.POSE_CONNECTIONS, body_mode, index_mapping)
+        
         fig = plt.figure(figsize=(12, 10))
         ax = fig.add_subplot(111, projection='3d')
         
         # Plot connections
-        for connection in self.POSE_CONNECTIONS:
+        for connection in filtered_connections:
             if (connection[0] < len(landmarks_3d) and 
                 connection[1] < len(landmarks_3d)):
                 x_coords = [landmarks_3d[connection[0]][0], landmarks_3d[connection[1]][0]]
@@ -178,19 +235,20 @@ class PoseVisualizer:
                 ax.plot3D(x_coords, y_coords, z_coords, 'b-', linewidth=2, alpha=0.6)
         
         # Plot landmarks
-        ax.scatter(landmarks_3d[:, 0], landmarks_3d[:, 1], landmarks_3d[:, 2], 
+        ax.scatter(filtered_landmarks_3d[:, 0], filtered_landmarks_3d[:, 1], filtered_landmarks_3d[:, 2], 
                   c='r', s=50, zorder=5)
         
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')
         ax.set_zlabel('Z (meters)')
-        ax.set_title(f'Pose 3D - Frame {frame_idx}')
+        body_title = "Full Body" if body_mode == 'full' else "Lower Body"
+        ax.set_title(f'Pose 3D - Frame {frame_idx} ({body_title})')
         
         # Set equal aspect ratio dengan bounds yang konsisten
         max_range = np.array([
-            landmarks_3d[:, 0].max() - landmarks_3d[:, 0].min(),
-            landmarks_3d[:, 1].max() - landmarks_3d[:, 1].min(),
-            landmarks_3d[:, 2].max() - landmarks_3d[:, 2].min()
+            filtered_landmarks_3d[:, 0].max() - filtered_landmarks_3d[:, 0].min(),
+            filtered_landmarks_3d[:, 1].max() - filtered_landmarks_3d[:, 1].min(),
+            filtered_landmarks_3d[:, 2].max() - filtered_landmarks_3d[:, 2].min()
         ]).max() / 2.0
         
         # Pastikan ada range minimum

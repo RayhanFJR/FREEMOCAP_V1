@@ -169,6 +169,14 @@ class VisualizeWidget(QWidget):
         self.view_combo.currentIndexChanged.connect(self.update_plot)
         controls_layout.addWidget(self.view_combo, 2, 1)
         
+        # Body mode (Full Body / Lower Body)
+        controls_layout.addWidget(QLabel("Body:"), 3, 0)
+        self.body_combo = QComboBox()
+        self.body_combo.addItems(["Full Body", "Lower Body"])
+        self.body_combo.setCurrentIndex(0)
+        self.body_combo.currentIndexChanged.connect(self.update_plot)
+        controls_layout.addWidget(self.body_combo, 3, 1)
+        
         controls_group.setLayout(controls_layout)
         layout.addWidget(controls_group)
         
@@ -236,6 +244,63 @@ class VisualizeWidget(QWidget):
             self.play_btn.setText("▶ Play")
             self.play_timer.stop()
     
+    def filter_landmarks(self, landmarks, body_mode):
+        """
+        Filter landmarks berdasarkan body mode
+        
+        Args:
+            landmarks: Array of landmarks (N, 2) or (N, 3)
+            body_mode: 0 = Full Body, 1 = Lower Body
+        
+        Returns:
+            Filtered landmarks dan mapping indices
+        """
+        if body_mode == 0:  # Full Body
+            return landmarks, list(range(len(landmarks)))
+        
+        # Lower Body: hanya hip (23, 24), knee (25, 26), ankle (27, 28)
+        lower_body_indices = [23, 24, 25, 26, 27, 28]
+        
+        if len(landmarks) <= max(lower_body_indices):
+            return landmarks, list(range(len(landmarks)))
+        
+        filtered_landmarks = landmarks[lower_body_indices]
+        # Create mapping: original index -> new index
+        index_mapping = {orig_idx: new_idx for new_idx, orig_idx in enumerate(lower_body_indices)}
+        
+        return filtered_landmarks, index_mapping
+    
+    def filter_connections(self, connections, body_mode, index_mapping):
+        """
+        Filter connections berdasarkan body mode
+        
+        Args:
+            connections: List of (idx1, idx2) tuples
+            body_mode: 0 = Full Body, 1 = Lower Body
+            index_mapping: Dictionary mapping original indices to new indices
+        
+        Returns:
+            Filtered connections
+        """
+        if body_mode == 0:  # Full Body
+            return connections
+        
+        # Lower Body connections: hip-hip, hip-knee, knee-ankle
+        lower_body_connections = [
+            (23, 24),  # hip to hip
+            (23, 25),  # left hip to left knee
+            (24, 26),  # right hip to right knee
+            (25, 27),  # left knee to left ankle
+            (26, 28),  # right knee to right ankle
+        ]
+        
+        filtered_connections = []
+        for conn in lower_body_connections:
+            if conn[0] in index_mapping and conn[1] in index_mapping:
+                filtered_connections.append((index_mapping[conn[0]], index_mapping[conn[1]]))
+        
+        return filtered_connections
+    
     def update_plot(self):
         """Update plot dengan frame saat ini"""
         if not self.visualizer or not self.visualizer.data:
@@ -246,6 +311,7 @@ class VisualizeWidget(QWidget):
         
         frame_data = self.visualizer.data[self.current_frame]
         view_mode = self.view_combo.currentIndex()
+        body_mode = self.body_combo.currentIndex()  # 0 = Full Body, 1 = Lower Body
         
         # Update frame label
         self.frame_label.setText(f"{self.current_frame + 1} / {len(self.visualizer.data)}")
@@ -254,12 +320,28 @@ class VisualizeWidget(QWidget):
         if view_mode in [0, 2]:  # 2D or Both
             if 'landmarks_2d' in frame_data and frame_data['landmarks_2d']:
                 landmarks_2d = np.array(frame_data['landmarks_2d'])
-                self.plot_2d.plot_2d_pose(
-                    landmarks_2d,
-                    self.visualizer.POSE_CONNECTIONS,
-                    self.visualizer.LANDMARK_NAMES
+                
+                # Filter landmarks
+                filtered_landmarks_2d, index_mapping = self.filter_landmarks(landmarks_2d, body_mode)
+                filtered_connections = self.filter_connections(
+                    self.visualizer.POSE_CONNECTIONS, body_mode, index_mapping
                 )
-                self.plot_2d.fig.suptitle(f'Frame {self.current_frame} - 2D Pose', fontsize=12)
+                
+                # Filter landmark names
+                if body_mode == 0:
+                    filtered_names = self.visualizer.LANDMARK_NAMES
+                else:
+                    lower_body_names = ['left_hip', 'right_hip', 'left_knee', 'right_knee', 
+                                       'left_ankle', 'right_ankle']
+                    filtered_names = lower_body_names
+                
+                self.plot_2d.plot_2d_pose(
+                    filtered_landmarks_2d,
+                    filtered_connections,
+                    filtered_names
+                )
+                body_title = "Full Body" if body_mode == 0 else "Lower Body"
+                self.plot_2d.fig.suptitle(f'Frame {self.current_frame} - 2D Pose ({body_title})', fontsize=12)
             else:
                 self.plot_2d.fig.clear()
                 self.plot_2d.fig.text(0.5, 0.5, '2D data tidak tersedia', 
@@ -270,22 +352,35 @@ class VisualizeWidget(QWidget):
         if view_mode in [1, 2]:  # 3D or Both
             if 'landmarks_3d' in frame_data and frame_data['landmarks_3d']:
                 landmarks_3d = np.array(frame_data['landmarks_3d'])
-                # Apply rotation seperti di visualize_pose.py
+                
+                # Normalize dengan hip center dulu (dari original landmarks)
                 if len(landmarks_3d) > 23:
                     hip_center = (landmarks_3d[23] + landmarks_3d[24]) / 2.0
                     landmarks_3d = landmarks_3d - hip_center
-                    rotation_matrix = np.array([
-                        [1, 0, 0],
-                        [0, 0, 1],
-                        [0, -1, 0]
-                    ])
-                    landmarks_3d = landmarks_3d @ rotation_matrix.T
+                else:
+                    hip_center = np.mean(landmarks_3d, axis=0)
+                    landmarks_3d = landmarks_3d - hip_center
+                
+                # Apply rotation
+                rotation_matrix = np.array([
+                    [1, 0, 0],
+                    [0, 0, 1],
+                    [0, -1, 0]
+                ])
+                landmarks_3d = landmarks_3d @ rotation_matrix.T
+                
+                # Filter landmarks setelah transformasi
+                filtered_landmarks_3d, index_mapping = self.filter_landmarks(landmarks_3d, body_mode)
+                filtered_connections = self.filter_connections(
+                    self.visualizer.POSE_CONNECTIONS, body_mode, index_mapping
+                )
                 
                 self.plot_3d.plot_3d_pose(
-                    landmarks_3d,
-                    self.visualizer.POSE_CONNECTIONS
+                    filtered_landmarks_3d,
+                    filtered_connections
                 )
-                self.plot_3d.fig.suptitle(f'Frame {self.current_frame} - 3D Pose', fontsize=12)
+                body_title = "Full Body" if body_mode == 0 else "Lower Body"
+                self.plot_3d.fig.suptitle(f'Frame {self.current_frame} - 3D Pose ({body_title})', fontsize=12)
             else:
                 self.plot_3d.fig.clear()
                 self.plot_3d.fig.text(0.5, 0.5, '3D data tidak tersedia', 

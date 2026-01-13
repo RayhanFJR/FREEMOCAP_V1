@@ -176,14 +176,37 @@ class CaptureWidget(QWidget):
         self.record_btn = QPushButton("Start Recording")
         self.pose_estimation_cb = QCheckBox("Enable Pose Estimation")
         self.pose_estimation_cb.setChecked(True)
+        self.filter_cb = QCheckBox("Enable Filter (Smoothing)")
+        self.filter_cb.setChecked(True)
         
         controls_layout.addWidget(self.start_btn)
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addWidget(self.record_btn)
         controls_layout.addWidget(self.pose_estimation_cb)
+        controls_layout.addWidget(self.filter_cb)
         
         controls_group.setLayout(controls_layout)
         layout.addWidget(controls_group)
+        
+        # Camera Setup Guide
+        guide_group = QGroupBox("📐 Panduan Posisi Kamera")
+        guide_layout = QVBoxLayout()
+        
+        guide_text = QLabel(
+            "<b>Posisi Kamera untuk Triangulasi:</b><br/>"
+            "• <b>Jarak antar kamera (baseline):</b> 30-80 cm<br/>"
+            "• <b>Kedua kamera harus melihat area yang sama</b><br/>"
+            "• <b>Ketinggian:</b> Setinggi subjek (1-1.5 m dari lantai)<br/>"
+            "• <b>Sudut:</b> 30-60° antara kedua kamera<br/>"
+            "• <b>Jarak ke subjek:</b> 1.5-3 meter<br/>"
+            "<br/><b>Tips:</b> Pastikan kedua kamera melihat seluruh tubuh subjek"
+        )
+        guide_text.setWordWrap(True)
+        guide_text.setStyleSheet("padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
+        guide_layout.addWidget(guide_text)
+        
+        guide_group.setLayout(guide_layout)
+        layout.addWidget(guide_group)
         
         # Info
         self.info_label = QLabel("Status: Stopped")
@@ -233,13 +256,57 @@ class MainWindow(QMainWindow):
         # Calibrators akan di-init setelah UI dibuat untuk mendapatkan settings
         self.webcam_calibrator = None
         self.rs_calibrator = None
-        self.pose_estimator = PoseEstimator()
+        # Pose estimator akan di-init setelah capture_widget dibuat
+        self.pose_estimator = None
         
         # Storage untuk kalibrasi yang sudah di-load
         self.webcam_camera_matrix = None
         self.webcam_dist_coeffs = None
         self.rs_camera_matrix = None
         self.rs_dist_coeffs = None
+        
+        # Stereo calibration (untuk triangulasi)
+        self.stereo_R = None
+        self.stereo_T = None
+        self.triangulator = None
+    
+    def initialize_triangulator(self):
+        """Initialize triangulator jika semua kalibrasi sudah dimuat"""
+        if (self.webcam_camera_matrix is not None and 
+            self.webcam_dist_coeffs is not None and
+            self.rs_camera_matrix is not None and 
+            self.rs_dist_coeffs is not None and
+            self.stereo_R is not None and 
+            self.stereo_T is not None and
+            self.pose_estimator is not None):
+            
+            from pose.triangulation import Triangulator
+            import pyrealsense2 as rs
+            
+            try:
+                self.triangulator = Triangulator(
+                    self.webcam_camera_matrix,
+                    self.webcam_dist_coeffs,
+                    self.rs_camera_matrix,
+                    self.rs_dist_coeffs,
+                    self.stereo_R,
+                    self.stereo_T
+                )
+                
+                # Set RealSense intrinsics untuk fallback
+                if self.capture.realsense.pipeline is not None:
+                    profile = self.capture.realsense.pipeline.get_active_profile()
+                    color_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
+                    intrinsics = color_profile.get_intrinsics()
+                    self.triangulator.set_realsense_intrinsics(intrinsics)
+                
+                self.pose_estimator.set_triangulator(self.triangulator)
+                print("Triangulator initialized successfully!")
+                return True
+            except Exception as e:
+                print(f"Error initializing triangulator: {e}")
+                return False
+        return False
         
         # State
         self.is_capturing = False
@@ -286,12 +353,22 @@ class MainWindow(QMainWindow):
         self.capture_widget.start_btn.clicked.connect(self.start_capture)
         self.capture_widget.stop_btn.clicked.connect(self.stop_capture)
         self.capture_widget.record_btn.clicked.connect(self.toggle_recording)
+        self.capture_widget.filter_cb.stateChanged.connect(self.on_filter_changed)
         tabs.addTab(self.capture_widget, "Motion Capture")
+        
+        # Initialize pose estimator setelah capture_widget dibuat
+        filter_enabled = self.capture_widget.filter_cb.isChecked()
+        self.pose_estimator = PoseEstimator(enable_filter=filter_enabled)
         
         # Visualize tab
         from visualization.visualize_gui import VisualizeWidget
         self.visualize_widget = VisualizeWidget()
         tabs.addTab(self.visualize_widget, "Visualize")
+        
+        # Trajectory Tracking tab
+        from visualization.trajectory_gui import TrajectoryWidget
+        self.trajectory_widget = TrajectoryWidget()
+        tabs.addTab(self.trajectory_widget, "Ankle Trajectory")
         
         layout.addWidget(tabs)
         central_widget.setLayout(layout)
@@ -467,16 +544,39 @@ class MainWindow(QMainWindow):
                 self.rs_dist_coeffs = dist_rs
                 self.calibration_widget.log_status(f"RealSense kalibrasi loaded: {size_rs}")
                 
+                # Try to load stereo calibration
+                stereo_file = webcam_file.replace('_webcam.json', '_stereo.json')
+                if not os.path.exists(stereo_file):
+                    stereo_file = realsense_file.replace('_realsense.json', '_stereo.json')
+                
+                if os.path.exists(stereo_file):
+                    try:
+                        from calibration.stereo_calibration import StereoCalibrator
+                        stereo_calib = StereoCalibrator(self.webcam_calibrator, self.rs_calibrator)
+                        R, T, E, F = stereo_calib.load_stereo_calibration(stereo_file)
+                        self.stereo_R = R
+                        self.stereo_T = T
+                        self.calibration_widget.log_status(f"Stereo kalibrasi loaded dari {stereo_file}")
+                        
+                        # Initialize triangulator
+                        if self.initialize_triangulator():
+                            self.calibration_widget.log_status("Triangulator initialized - menggunakan triangulasi untuk 3D reconstruction")
+                    except Exception as e:
+                        self.calibration_widget.log_status(f"Tidak bisa load stereo calibration: {e}")
+                else:
+                    self.calibration_widget.log_status("Stereo calibration tidak ditemukan - akan menggunakan depth-based 3D")
+                
                 # Update status label
+                stereo_status = "✓" if self.stereo_R is not None else "✗"
                 self.calibration_widget.calib_status_label.setText(
-                    "Kalibrasi: Webcam ✓ | RealSense ✓"
+                    f"Kalibrasi: Webcam ✓ | RealSense ✓ | Stereo {stereo_status}"
                 )
                 self.calibration_widget.calib_status_label.setStyleSheet("font-weight: bold; color: green;")
                 
                 QMessageBox.information(
                     self, 
                     "Success", 
-                    f"Kalibrasi berhasil dimuat!\n\nWebcam: {size_wc}\nRealSense: {size_rs}"
+                    f"Kalibrasi berhasil dimuat!\n\nWebcam: {size_wc}\nRealSense: {size_rs}\nStereo: {'Loaded' if self.stereo_R is not None else 'Not found'}"
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error saat load: {str(e)}")
@@ -669,6 +769,11 @@ class MainWindow(QMainWindow):
                 # Jika di tab kalibrasi, tampilkan deteksi ChArUco
                 if is_calibration_tab and hasattr(self, 'webcam_calibrator'):
                     webcam_frame = self.webcam_calibrator.draw_charuco_board(webcam_frame)
+                # Pose estimation jika enabled dan di tab motion capture
+                elif self.capture_widget.pose_estimation_cb.isChecked() and self.pose_estimator:
+                    landmarks = self.pose_estimator.process(webcam_frame)
+                    if landmarks:
+                        webcam_frame = self.pose_estimator.draw_landmarks(webcam_frame, landmarks)
                 
                 self.capture_widget.webcam_display.set_frame(webcam_frame)
             
@@ -680,7 +785,7 @@ class MainWindow(QMainWindow):
                 if is_calibration_tab and hasattr(self, 'rs_calibrator'):
                     rs_frame = self.rs_calibrator.draw_charuco_board(rs_frame)
                 # Pose estimation jika enabled dan di tab motion capture
-                elif self.capture_widget.pose_estimation_cb.isChecked():
+                elif self.capture_widget.pose_estimation_cb.isChecked() and self.pose_estimator:
                     landmarks = self.pose_estimator.process(rs_frame)
                     if landmarks:
                         rs_frame = self.pose_estimator.draw_landmarks(rs_frame, landmarks)
@@ -694,11 +799,23 @@ class MainWindow(QMainWindow):
                                     color_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
                                     intrinsics = color_profile.get_intrinsics()
                                     
+                                    # Get webcam landmarks untuk triangulasi
+                                    landmarks_2d_webcam = None
+                                    if frames['webcam'] is not None:
+                                        webcam_landmarks = self.pose_estimator.process(frames['webcam'])
+                                        if webcam_landmarks:
+                                            landmarks_2d_webcam = self.pose_estimator.get_landmarks_2d(
+                                                webcam_landmarks, 
+                                                frames['webcam'].shape,
+                                                apply_filter=False
+                                            )
+                                    
                                     data = self.pose_estimator.landmarks_to_dict(
                                         landmarks, 
                                         rs_frame.shape,
-                                        frames['realsense_depth_frame'],
-                                        intrinsics
+                                        depth_frame=frames['realsense_depth_frame'],
+                                        intrinsics=intrinsics,
+                                        landmarks_2d_webcam=landmarks_2d_webcam
                                     )
                                     self.recorded_data.append(data)
                             except Exception as e:
@@ -710,10 +827,19 @@ class MainWindow(QMainWindow):
             if frames['realsense_depth'] is not None:
                 self.capture_widget.depth_display.set_frame(frames['realsense_depth'])
     
+    def on_filter_changed(self, state):
+        """Handle filter checkbox change"""
+        if self.pose_estimator:
+            enabled = (state == Qt.Checked)
+            self.pose_estimator.set_filter_enabled(enabled)
+            if enabled:
+                self.pose_estimator.reset_filter()  # Reset filter state
+    
     def closeEvent(self, event):
         """Cleanup saat window ditutup"""
         self.stop_capture()
-        self.pose_estimator.release()
+        if self.pose_estimator:
+            self.pose_estimator.release()
         event.accept()
 
 
