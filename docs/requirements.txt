@@ -1,10 +1,66 @@
-opencv-python==4.8.1.78
-pyrealsense2==2.54.1
-mediapipe==0.10.7
-numpy==1.24.3
-PyQt5==5.15.10
-scipy==1.11.3
-matplotlib==3.8.0
-pandas==2.0.3
-Pillow==10.0.0
+# ========================================
+# Dual Camera Foot Tracking System
+# Python Dependencies
+# ========================================
 
+# Core Computer Vision & Image Processing
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0,<2.0.0
+
+# Pose Estimation
+mediapipe>=0.10.0
+
+# Intel RealSense SDK
+pyrealsense2>=2.54.0
+
+# GUI & Image Display
+# Note: tkinter is usually pre-installed with Python
+# If missing, install python3-tk (Linux) or include it in Python installation (Windows)
+Pillow>=10.0.0
+
+# Data Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Data Processing & Analysis
+pandas>=2.0.0
+scipy>=1.11.0
+
+# Advanced Filtering
+filterpy>=1.4.5
+
+# ========================================
+# Optional Dependencies (for better performance)
+# ========================================
+
+# Faster array operations (optional but recommended)
+# numba>=0.57.0
+
+# Better video codecs (optional)
+# opencv-python-headless>=4.8.0
+
+# ========================================
+# Platform-Specific Notes
+# ========================================
+
+# Windows:
+#   - Install Visual C++ Redistributable if needed
+#   - RealSense SDK may require additional drivers
+#
+# Linux (Ubuntu/Debian):
+#   sudo apt-get install python3-tk
+#   sudo apt-get install libgl1-mesa-glx
+#   sudo apt-get install libglib2.0-0
+#
+# macOS:
+#   - tkinter included with Python from python.org
+#   - RealSense support may be limited
+
+# ========================================
+# Installation Command
+# ========================================
+# pip install -r requirements.txt
+
+# For development environment:
+# pip install -r requirements.txt --upgrade
